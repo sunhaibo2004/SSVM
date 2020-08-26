@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "aot/compiler.h"
 #include "runtime/instance/memory.h"
+#include "runtime/instance/table.h"
 #include "support/filesystem.h"
 #include "support/log.h"
 #include <lld/Common/Driver.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LegacyPassManager.h>
+#include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/MC/SubtargetFeature.h>
 #include <llvm/Passes/PassBuilder.h>
@@ -55,7 +57,7 @@ template <typename... Ts> struct overloaded : Ts... {
 template <typename... Ts> overloaded(Ts...) -> overloaded<Ts...>;
 
 /// force checking div/rem on zero
-static inline constexpr bool ForceDivCheck = false;
+static inline constexpr bool kForceDivCheck = true;
 
 /// Translate Compiler::OptimizationLevel to llvm::PassBuilder version
 static inline llvm::PassBuilder::OptimizationLevel
@@ -79,7 +81,6 @@ toLLVMLevel(SSVM::AOT::Compiler::OptimizationLevel Level) {
     __builtin_unreachable();
   }
 }
-
 } // namespace
 
 struct SSVM::AOT::Compiler::CompileContext {
@@ -108,14 +109,15 @@ struct SSVM::AOT::Compiler::CompileContext {
 #endif
   std::vector<const AST::FunctionType *> FunctionTypes;
   std::vector<llvm::Function *> FunctionWrappers;
-  std::vector<unsigned int> Elements;
-  std::vector<
-      std::tuple<unsigned int, llvm::Function *, SSVM::AST::CodeSegment *>>
+  std::vector<std::tuple<uint32_t, llvm::Function *, SSVM::AST::CodeSegment *>>
       Functions;
   std::vector<llvm::GlobalVariable *> Globals;
   llvm::GlobalVariable *Call;
+  llvm::GlobalVariable *TableCall;
   llvm::GlobalVariable *MemGrow;
+  llvm::GlobalVariable *TableGrow;
   llvm::GlobalVariable *Mem;
+  llvm::GlobalVariable *Table;
   llvm::GlobalVariable *TrapCode;
   llvm::GlobalVariable *InstrCount;
   llvm::Function *Trap;
@@ -138,13 +140,26 @@ struct SSVM::AOT::Compiler::CompileContext {
                                     false)
                 ->getPointerTo(),
             true, llvm::GlobalVariable::ExternalLinkage, nullptr, "call")),
+        TableCall(new llvm::GlobalVariable(
+            LLModule,
+            llvm::FunctionType::get(
+                VoidTy, {Int32Ty, Int32Ty, Int8PtrTy, Int8PtrTy}, false)
+                ->getPointerTo(),
+            true, llvm::GlobalVariable::ExternalLinkage, nullptr, "tablecall")),
         MemGrow(new llvm::GlobalVariable(
             LLModule,
             llvm::FunctionType::get(Int32Ty, {Int32Ty}, false)->getPointerTo(),
             true, llvm::GlobalVariable::ExternalLinkage, nullptr, "memgrow")),
+        TableGrow(new llvm::GlobalVariable(
+            LLModule,
+            llvm::FunctionType::get(Int32Ty, {Int32Ty}, false)->getPointerTo(),
+            true, llvm::GlobalVariable::ExternalLinkage, nullptr, "tablegrow")),
         Mem(new llvm::GlobalVariable(LLModule, Int8PtrTy, true,
                                      llvm::GlobalValue::ExternalLinkage,
                                      nullptr, "mem")),
+        Table(new llvm::GlobalVariable(LLModule, Int8PtrTy->getPointerTo(),
+                                       true, llvm::GlobalValue::ExternalLinkage,
+                                       nullptr, "table")),
         TrapCode(new llvm::GlobalVariable(LLModule, Int32PtrTy, false,
                                           llvm::GlobalValue::ExternalLinkage,
                                           nullptr, "code")),
@@ -153,13 +168,8 @@ struct SSVM::AOT::Compiler::CompileContext {
                                             nullptr, "instr")),
         Trap(llvm::Function::Create(
             llvm::FunctionType::get(VoidTy, {Int32Ty}, false),
-            llvm::Function::InternalLinkage, "trap", LLModule)),
-        Likely(llvm::MDTuple::getDistinct(
-            LLContext, {llvm::MDString::get(LLContext, "branch_weights"),
-                        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                            LLContext, llvm::APInt(32, 2000))),
-                        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                            LLContext, llvm::APInt(32, 0)))})) {
+            llvm::Function::InternalLinkage, "trap", M)),
+        Likely(llvm::MDBuilder(LLContext).createBranchWeights(2000, 0)) {
     Trap->addFnAttr(llvm::Attribute::NoReturn);
     TrapCode->setInitializer(llvm::ConstantPointerNull::get(Int32PtrTy));
     InstrCount->setInitializer(
@@ -285,8 +295,9 @@ static llvm::Constant *toLLVMConstantZero(llvm::LLVMContext &LLContext,
 class FunctionCompiler {
 public:
   FunctionCompiler(AOT::Compiler::CompileContext &Context, llvm::Function *F,
-                   Span<const ValType> Locals, bool CalculateInstrCount)
-      : Context(Context), LLContext(Context.LLContext), F(F),
+                   Span<const ValType> Locals, bool CalculateInstrCount,
+                   bool OptNone)
+      : Context(Context), LLContext(Context.LLContext), OptNone(OptNone), F(F),
         Builder(llvm::BasicBlock::Create(LLContext, "entry", F)) {
     if (F) {
       Builder.setIsFPConstrained(true);
@@ -1083,7 +1094,7 @@ public:
       break;
     case OpCode::I32__div_s:
     case OpCode::I64__div_s:
-      if constexpr (ForceDivCheck) {
+      if constexpr (kForceDivCheck) {
         const bool Is32 = Instr.getOpCode() == OpCode::I32__div_s;
         llvm::ConstantInt *IntZero =
             Is32 ? Builder.getInt32(0) : Builder.getInt64(0);
@@ -1112,7 +1123,7 @@ public:
       break;
     case OpCode::I32__div_u:
     case OpCode::I64__div_u:
-      if constexpr (ForceDivCheck) {
+      if constexpr (kForceDivCheck) {
         const bool Is32 = Instr.getOpCode() == OpCode::I32__div_u;
         llvm::ConstantInt *IntZero =
             Is32 ? Builder.getInt32(0) : Builder.getInt64(0);
@@ -1139,7 +1150,7 @@ public:
           llvm::BasicBlock::Create(LLContext, "no.overflow", F);
       auto *EndBB = llvm::BasicBlock::Create(LLContext, "end.overflow", F);
 
-      if constexpr (ForceDivCheck) {
+      if constexpr (kForceDivCheck) {
         auto *OkBB = llvm::BasicBlock::Create(LLContext, "rem.ok", F);
         Builder.CreateCondBr(Builder.CreateICmpNE(RHS, IntZero), OkBB,
                              getTrapBB(ErrCode::DivideByZero), Context.Likely);
@@ -1166,7 +1177,7 @@ public:
     }
     case OpCode::I32__rem_u:
     case OpCode::I64__rem_u:
-      if constexpr (ForceDivCheck) {
+      if constexpr (kForceDivCheck) {
         llvm::ConstantInt *IntZero = Instr.getOpCode() == OpCode::I32__rem_u
                                          ? Builder.getInt32(0)
                                          : Builder.getInt64(0);
@@ -1477,55 +1488,54 @@ private:
     return {};
   }
 
-  Expect<void> compileIndirectCallOp(const unsigned int FuncTypeIndex) {
+  Expect<void> compileIndirectCallOp(const uint32_t FuncTypeIndex) {
     llvm::Value *Value = stackPop();
     const auto &FuncType = *Context.FunctionTypes[FuncTypeIndex];
-    const auto &ParamTypes = FuncType.getParamTypes();
-    std::vector<llvm::Value *> Args(ParamTypes.size());
-    for (size_t I = 0; I < ParamTypes.size(); ++I) {
-      const size_t J = ParamTypes.size() - 1 - I;
-      Args[J] = stackPop();
+    auto *FTy = toLLVMType(LLContext, FuncType);
+    auto *RTy = FTy->getReturnType();
+
+    const auto ArgSize = FuncType.getParamTypes().size();
+    const auto RetSize = RTy->isVoidTy() ? 0 : FuncType.getReturnTypes().size();
+
+    llvm::Value *Args;
+    if (ArgSize == 0) {
+      Args = llvm::ConstantPointerNull::get(Builder.getInt8PtrTy());
+    } else {
+      Args = Builder.CreateAlloca(Builder.getInt8Ty(),
+                                  Builder.getInt64(ArgSize * 8));
     }
 
-    std::vector<std::pair<size_t, llvm::Function *>> Table;
-    for (uint32_t I = 0; I < Context.Elements.size(); ++I) {
-      const auto FuncIdx = Context.Elements[I];
-      const auto FuncTypeIndex2 = std::get<0>(Context.Functions[FuncIdx]);
-      const auto &FuncType2 = *Context.FunctionTypes[FuncTypeIndex2];
-      if (FuncTypeIndex == FuncTypeIndex2 || FuncType == FuncType2) {
-        Table.emplace_back(I, std::get<1>(Context.Functions[FuncIdx]));
+    llvm::Value *Rets;
+    if (RetSize == 0) {
+      Rets = llvm::ConstantPointerNull::get(Builder.getInt8PtrTy());
+    } else {
+      Rets = Builder.CreateAlloca(Builder.getInt8Ty(),
+                                  Builder.getInt64(RetSize * 8));
+    }
+
+    for (unsigned I = 0; I < ArgSize; ++I) {
+      const unsigned J = ArgSize - 1 - I;
+      auto *Arg = stackPop();
+      auto *Ptr = Builder.CreateConstInBoundsGEP1_64(Args, J * 8);
+      Builder.CreateStore(
+          Arg, Builder.CreateBitCast(Ptr, Arg->getType()->getPointerTo()));
+    }
+
+    Builder.CreateCall(Builder.CreateLoad(Context.TableCall),
+                       {Builder.getInt32(FuncTypeIndex), Value, Args, Rets});
+
+    if (RetSize == 0) {
+    } else if (RetSize == 1) {
+      auto *VPtr = Builder.CreateConstInBoundsGEP1_64(Rets, 0);
+      auto *Ptr = Builder.CreateBitCast(VPtr, RTy->getPointerTo());
+      stackPush(Builder.CreateLoad(Ptr));
+    } else {
+      for (unsigned I = 0; I < RetSize; ++I) {
+        auto *VPtr = Builder.CreateConstInBoundsGEP1_64(Rets, I * 8);
+        auto *Ptr = Builder.CreateBitCast(
+            VPtr, RTy->getStructElementType(I)->getPointerTo());
+        stackPush(Builder.CreateLoad(Ptr));
       }
-    }
-    auto *OKBB = llvm::BasicBlock::Create(LLContext, "call_indirect.end", F);
-    auto *Switch = Builder.CreateSwitch(
-        Value, getTrapBB(ErrCode::UndefinedElement), Table.size());
-
-    const bool HasReturnValue = !isVoidReturn(FuncType.getReturnTypes());
-    const bool HasMultipleValule = FuncType.getReturnTypes().size() > 1;
-    std::vector<std::tuple<std::vector<llvm::Value *>, llvm::BasicBlock *>>
-        ReturnValues;
-    if (HasReturnValue) {
-      ReturnValues.reserve(Table.size());
-    }
-
-    for (const auto &[Value, Function] : Table) {
-      auto *Entry = llvm::BasicBlock::Create(
-          LLContext, "call_indirect." + std::to_string(Value), F);
-      Builder.SetInsertPoint(Entry);
-
-      auto *Ret = Builder.CreateCall(Function, Args);
-      if (HasMultipleValule) {
-        ReturnValues.emplace_back(unpackStruct(Builder, Ret), Entry);
-      } else if (HasReturnValue) {
-        ReturnValues.emplace_back(std::vector<llvm::Value *>{Ret}, Entry);
-      }
-      Builder.CreateBr(OKBB);
-      Switch->addCase(Builder.getInt32(Value), Entry);
-    }
-
-    Builder.SetInsertPoint(OKBB);
-    if (HasReturnValue) {
-      buildPHI(FuncType.getReturnTypes(), ReturnValues);
     }
 
     return {};
@@ -1541,7 +1551,7 @@ private:
     auto *VPtr =
         Builder.CreateInBoundsGEP(Builder.CreateLoad(Context.Mem), {Off});
     auto *Ptr = Builder.CreateBitCast(VPtr, LoadTy->getPointerTo());
-    auto *LoadInst = Builder.CreateLoad(Ptr);
+    auto *LoadInst = Builder.CreateLoad(Ptr, OptNone);
     LoadInst->setAlignment(Align(UINT64_C(1) << Alignment));
     stackPush(LoadInst);
     return {};
@@ -1573,7 +1583,7 @@ private:
     auto *VPtr =
         Builder.CreateInBoundsGEP(Builder.CreateLoad(Context.Mem), {Off});
     auto *Ptr = Builder.CreateBitCast(VPtr, LoadTy->getPointerTo());
-    auto *StoreInst = Builder.CreateStore(V, Ptr);
+    auto *StoreInst = Builder.CreateStore(V, Ptr, OptNone);
     StoreInst->setAlignment(Align(UINT64_C(1) << Alignment));
     return {};
   }
@@ -1725,6 +1735,7 @@ private:
   llvm::Value *LocalInstrCount = nullptr;
   std::unordered_map<ErrCode, llvm::BasicBlock *> TrapBB;
   bool IsUnreachable = false;
+  bool OptNone = false;
   static inline constexpr size_t kStackSize = 0;
   static inline constexpr size_t kJumpBlock = 1;
   static inline constexpr size_t kReturnType = 2;
@@ -1950,7 +1961,6 @@ Expect<void> Compiler::compile(Span<const Byte> Data, const AST::Module &Module,
             PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
 
             llvm::ModulePassManager MPM(false);
-
             MPM.addPass(PB.buildPerModuleDefaultPipeline(toLLVMLevel(Level)));
             MPM.run(*LLModule, MAM);
           }
@@ -1981,17 +1991,30 @@ Expect<void> Compiler::compile(Span<const Byte> Data, const AST::Module &Module,
                   llvm::cast<llvm::PointerType>(Call->getValueType())));
               Call->setConstant(false);
             }
-
+            if (auto *TableCall = LLModule->getGlobalVariable("tablecall")) {
+              TableCall->setInitializer(llvm::ConstantPointerNull::get(
+                  llvm::cast<llvm::PointerType>(TableCall->getValueType())));
+              TableCall->setConstant(false);
+            }
             if (auto *MemGrow = LLModule->getGlobalVariable("memgrow")) {
               MemGrow->setInitializer(llvm::ConstantPointerNull::get(
                   llvm::cast<llvm::PointerType>(MemGrow->getValueType())));
               MemGrow->setConstant(false);
             }
-
+            if (auto *TableGrow = LLModule->getGlobalVariable("tablegrow")) {
+              TableGrow->setInitializer(llvm::ConstantPointerNull::get(
+                  llvm::cast<llvm::PointerType>(TableGrow->getValueType())));
+              TableGrow->setConstant(false);
+            }
             if (auto *Mem = LLModule->getGlobalVariable("mem")) {
               Mem->setInitializer(llvm::ConstantPointerNull::get(
                   llvm::cast<llvm::PointerType>(Mem->getValueType())));
               Mem->setConstant(false);
+            }
+            if (auto *Table = LLModule->getGlobalVariable("table")) {
+              Table->setInitializer(llvm::ConstantPointerNull::get(
+                  llvm::cast<llvm::PointerType>(Table->getValueType())));
+              Table->setConstant(false);
             }
           }
 
@@ -2302,20 +2325,6 @@ Expect<void> Compiler::compile(const AST::TableSection &TableSection,
   if (TableSection.getContent().size() != 1) {
     return Unexpect(ErrCode::MultiTables);
   }
-  auto &Elements = Context->Elements;
-  for (const auto &Element : ElementSection.getContent()) {
-    auto Temp = FunctionCompiler::evaluate(Element->getInstrs(), *Context);
-    if (!Temp) {
-      return Unexpect(Temp);
-    }
-    const uint64_t Offset =
-        llvm::cast<llvm::ConstantInt>(*Temp)->getZExtValue();
-    const auto &FuncIdxes = Element->getFuncIdxes();
-    if (Elements.size() < Offset + FuncIdxes.size()) {
-      Elements.resize(Offset + FuncIdxes.size());
-    }
-    std::copy(FuncIdxes.begin(), FuncIdxes.end(), Elements.begin() + Offset);
-  }
   return {};
 }
 
@@ -2365,7 +2374,7 @@ Expect<void> Compiler::compile(const AST::FunctionSection &FuncSec,
     }
 
     const auto &ReturnTypes = Context->FunctionTypes[T]->getReturnTypes();
-    FunctionCompiler FC(*Context, F, Locals, false);
+    FunctionCompiler FC(*Context, F, Locals, false, optNone());
     if (auto Status = FC.compile(*Code, ReturnTypes); !Status) {
       return Status;
     }

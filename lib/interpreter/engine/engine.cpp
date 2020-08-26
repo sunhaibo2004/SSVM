@@ -57,8 +57,35 @@ void Interpreter::callProxy(const uint32_t FuncIndex, const ValVariant *Args,
   }
 }
 
+void Interpreter::tableCallProxy(const uint32_t FuncTypeIndex,
+                                 const uint32_t FuncIndex,
+                                 const ValVariant *Args, ValVariant *Rets) {
+  {
+    std::signal(SIGILL, SIG_DFL);
+    std::signal(SIGABRT, SIG_DFL);
+    std::signal(SIGFPE, SIG_DFL);
+    std::signal(SIGSEGV, SIG_DFL);
+  }
+  auto SavedTrapJump = TrapJump;
+  This->tableCall(FuncTypeIndex, FuncIndex, Args, Rets);
+  TrapJump = SavedTrapJump;
+  {
+    struct sigaction Action {};
+    Action.sa_sigaction = &signalHandler;
+    Action.sa_flags = SA_SIGINFO;
+    sigaction(SIGILL, &Action, nullptr);
+    sigaction(SIGABRT, &Action, nullptr);
+    sigaction(SIGFPE, &Action, nullptr);
+    sigaction(SIGSEGV, &Action, nullptr);
+  }
+}
+
 uint32_t Interpreter::memGrowProxy(const uint32_t NewSize) {
   return This->memGrow(NewSize);
+}
+
+uint32_t Interpreter::tableGrowProxy(const uint32_t NewSize) {
+  return This->tableGrow(NewSize);
 }
 
 void Interpreter::call(const uint32_t FuncIndex, const ValVariant *Args,
@@ -82,11 +109,57 @@ void Interpreter::call(const uint32_t FuncIndex, const ValVariant *Args,
   }
 }
 
+void Interpreter::tableCall(const uint32_t FuncTypeIndex,
+                            const uint32_t FuncIndex, const ValVariant *Args,
+                            ValVariant *Rets) {
+  const auto *TabInst = getTabInstByIdx(*CurrentStore, 0);
+  const auto *ModInst = *CurrentStore->getModule(StackMgr.getModuleAddr());
+  const auto *TargetFuncType = *ModInst->getFuncType(FuncTypeIndex);
+
+  uint32_t FuncAddr;
+  if (auto Res = TabInst->getElemAddr(FuncIndex)) {
+    FuncAddr = *Res;
+  } else {
+    siglongjmp(*TrapJump, uint32_t(Res.error()));
+    return;
+  }
+
+  const auto *FuncInst = *CurrentStore->getFunction(FuncAddr);
+  const auto &FuncType = FuncInst->getFuncType();
+  if (*TargetFuncType != FuncType) {
+    siglongjmp(*TrapJump, uint32_t(ErrCode::IndirectCallTypeMismatch));
+  }
+
+  const unsigned ParamsSize = FuncType.Params.size();
+  const unsigned ReturnsSize = FuncType.Returns.size();
+
+  for (unsigned I = 0; I < ParamsSize; ++I) {
+    StackMgr.push(Args[I]);
+  }
+  if (auto Res = enterFunction(*CurrentStore, *FuncInst); !Res) {
+    siglongjmp(*TrapJump, uint32_t(Res.error()));
+    return;
+  }
+  for (unsigned I = 0; I < ReturnsSize; ++I) {
+    Rets[ReturnsSize - 1 - I] = StackMgr.pop();
+  }
+}
+
 uint32_t Interpreter::memGrow(const uint32_t NewSize) {
   auto &MemInst = *getMemInstByIdx(*CurrentStore, 0);
   const uint32_t CurrPageSize = MemInst.getDataPageSize();
   if (MemInst.growPage(NewSize)) {
     return CurrPageSize;
+  } else {
+    return -1;
+  }
+}
+
+uint32_t Interpreter::tableGrow(const uint32_t NewSize) {
+  auto &TabInst = *getTabInstByIdx(*CurrentStore, 0);
+  const uint32_t CurrTableSize = TabInst.getSize();
+  if (TabInst.growTable(NewSize)) {
+    return CurrTableSize;
   } else {
     return -1;
   }

@@ -30,12 +30,14 @@ public:
   TableInstance() = delete;
   TableInstance(const ElemType &Elem, const AST::Limit &Lim)
       : Type(Elem), HasMaxSize(Lim.hasMax()), MinSize(Lim.getMin()),
-        MaxSize(Lim.getMax()), FuncElem(MinSize), FuncElemInit(MinSize, false) {
-  }
+        MaxSize(Lim.getMax()), Elem(MinSize) {}
   virtual ~TableInstance() = default;
 
   /// Getter of element type.
   ElemType getElementType() const { return Type; }
+
+  /// Get table size
+  uint32_t getSize() const noexcept { return Elem.size(); }
 
   /// Getter of limit definition.
   bool getHasMax() const { return HasMaxSize; }
@@ -49,9 +51,10 @@ public:
   /// Set the function index initialization list.
   Expect<void> setInitList(const uint32_t Offset, Span<const uint32_t> Addrs) {
     /// Boundary checked during validation.
-    std::copy(Addrs.begin(), Addrs.end(), FuncElem.begin() + Offset);
-    std::fill(FuncElemInit.begin() + Offset,
-              FuncElemInit.begin() + Offset + Addrs.size(), true);
+    std::transform(Addrs.begin(), Addrs.end(), Elem.begin() + Offset,
+                   [](uint32_t Addr) -> std::pair<uint32_t, uint32_t> {
+                     return {UINT32_C(1), Addr};
+                   });
     return {};
   }
 
@@ -67,29 +70,44 @@ public:
     return ((MinSize > 0) ? (MinSize - 1) : 0);
   }
 
+  /// Grow table
+  bool growTable(const uint32_t Count) {
+    uint32_t MaxTableCaped = 65536;
+    if (getHasMax()) {
+      MaxTableCaped = std::min(getMax(), MaxTableCaped);
+    }
+    if (Count + Elem.size() > MaxTableCaped) {
+      return false;
+    }
+    Elem.resize(Count + Elem.size());
+    if (Symbol) {
+      *Symbol = Elem.data();
+    }
+    return true;
+  }
+
   /// Get the elem address.
   Expect<uint32_t> getElemAddr(const uint32_t Idx) const {
-    if (Idx >= FuncElem.size()) {
+    if (Idx >= Elem.size()) {
       LOG(ERROR) << ErrCode::UndefinedElement;
       LOG(ERROR) << ErrInfo::InfoBoundary(Idx, 1, getBoundIdx());
       return Unexpect(ErrCode::UndefinedElement);
     }
-    if (Symbol) {
-      return Symbol[Idx];
+    if (Elem[Idx].first != 0) {
+      return Elem[Idx].second;
     } else {
-      if (FuncElemInit[Idx]) {
-        return FuncElem[Idx];
-      } else {
-        LOG(ERROR) << ErrCode::UninitializedElement;
-        return Unexpect(ErrCode::UninitializedElement);
-      }
+      LOG(ERROR) << ErrCode::UninitializedElement;
+      return Unexpect(ErrCode::UninitializedElement);
     }
   }
 
   /// Getter of symbol
   const auto &getSymbol() const noexcept { return Symbol; }
   /// Setter of symbol
-  void setSymbol(DLSymbol<uint32_t> S) noexcept { Symbol = std::move(S); }
+  void setSymbol(DLSymbol<std::pair<uint32_t, uint32_t> *> S) noexcept {
+    Symbol = std::move(S);
+    *Symbol = Elem.data();
+  }
 
 private:
   /// \name Data of table instance.
@@ -98,9 +116,8 @@ private:
   const bool HasMaxSize;
   const uint32_t MinSize = 0;
   const uint32_t MaxSize = 0;
-  std::vector<uint32_t> FuncElem;
-  std::vector<bool> FuncElemInit;
-  DLSymbol<uint32_t> Symbol;
+  std::vector<std::pair<uint32_t, uint32_t>> Elem;
+  DLSymbol<std::pair<uint32_t, uint32_t> *> Symbol;
   /// @}
 };
 

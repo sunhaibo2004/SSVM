@@ -56,12 +56,13 @@ Expect<void> Interpreter::instantiate(
     auto *TabInst = *StoreMgr.getTable(TabAddr);
 
     /// Transfer function index to address and copy data to table instance.
-    std::vector<uint32_t> FuncIdxList;
-    FuncIdxList.reserve((*ItElemSeg)->getFuncIdxes().size());
-    for (auto &Idx : (*ItElemSeg)->getFuncIdxes()) {
-      FuncIdxList.push_back(*ModInst.getFuncAddr(Idx));
+    const auto &FuncIdxes = (*ItElemSeg)->getFuncIdxes();
+    std::vector<uint32_t> FuncAddrList;
+    FuncAddrList.reserve(FuncIdxes.size());
+    for (auto &Idx : FuncIdxes) {
+      FuncAddrList.push_back(*ModInst.getFuncAddr(Idx));
     }
-    TabInst->setInitList(*ItOffset, FuncIdxList);
+    TabInst->setInitList(*ItOffset, FuncAddrList);
 
     ++ItElemSeg;
     ++ItOffset;

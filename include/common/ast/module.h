@@ -63,7 +63,11 @@ public:
   using TrapCodeProxy = uint32_t *;
   using CallProxy = void (*)(const uint32_t FuncIdx, const ValVariant *Args,
                              ValVariant *Rets);
+  using TableCallProxy = void (*)(const uint32_t FuncTypeIdx,
+                                  const uint32_t FuncIdx,
+                                  const ValVariant *Args, ValVariant *Rets);
   using MemGrowProxy = uint32_t (*)(const uint32_t Diff);
+  using TableGrowProxy = uint32_t (*)(const uint32_t Diff);
 
   void setTrapCodeProxySymbol(DLSymbol<TrapCodeProxy> Symbol) {
     TrapCodeProxySymbol = std::move(Symbol);
@@ -71,8 +75,14 @@ public:
   void setCallProxySymbol(DLSymbol<CallProxy> Symbol) {
     CallProxySymbol = std::move(Symbol);
   }
+  void setTableCallProxySymbol(DLSymbol<TableCallProxy> Symbol) {
+    TableCallProxySymbol = std::move(Symbol);
+  }
   void setMemGrowProxySymbol(DLSymbol<MemGrowProxy> Symbol) {
     MemGrowProxySymbol = std::move(Symbol);
+  }
+  void setTableGrowProxySymbol(DLSymbol<TableGrowProxy> Symbol) {
+    TableGrowProxySymbol = std::move(Symbol);
   }
   void setTrapCodeProxy(TrapCodeProxy Pointer) const {
     if (TrapCodeProxySymbol)
@@ -82,9 +92,17 @@ public:
     if (CallProxySymbol)
       *CallProxySymbol = Pointer;
   }
+  void setTableCallProxy(TableCallProxy Pointer) const {
+    if (TableCallProxySymbol)
+      *TableCallProxySymbol = Pointer;
+  }
   void setMemGrowProxy(MemGrowProxy Pointer) const {
     if (MemGrowProxySymbol)
       *MemGrowProxySymbol = Pointer;
+  }
+  void setTableGrowProxy(TableGrowProxy Pointer) const {
+    if (TableGrowProxySymbol)
+      *TableGrowProxySymbol = Pointer;
   }
 
   /// The node type should be ASTNodeAttr::Module.
@@ -152,7 +170,9 @@ private:
 
   DLSymbol<TrapCodeProxy> TrapCodeProxySymbol;
   DLSymbol<CallProxy> CallProxySymbol;
+  DLSymbol<TableCallProxy> TableCallProxySymbol;
   DLSymbol<MemGrowProxy> MemGrowProxySymbol;
+  DLSymbol<TableGrowProxy> TableGrowProxySymbol;
 };
 
 } // namespace AST

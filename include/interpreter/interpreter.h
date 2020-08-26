@@ -371,7 +371,10 @@ private:
   /// \name Run compiled functions
   /// @{
   void call(const uint32_t FuncIndex, const ValVariant *Args, ValVariant *Rets);
+  void tableCall(const uint32_t FuncTypeIndex, const uint32_t FuncIndex,
+                 const ValVariant *Args, ValVariant *Rets);
   uint32_t memGrow(const uint32_t NewSize);
+  uint32_t tableGrow(const uint32_t NewSize);
 
   /// Pointer to current object.
   static Interpreter *This;
@@ -380,7 +383,11 @@ private:
   static uint32_t TrapCodeProxy;
   static void callProxy(const uint32_t FuncIndex, const ValVariant *Args,
                         ValVariant *Rets);
+  static void tableCallProxy(const uint32_t FuncTypeIndex,
+                             const uint32_t FuncIndex, const ValVariant *Args,
+                             ValVariant *Rets);
   static uint32_t memGrowProxy(const uint32_t NewSize);
+  static uint32_t tableGrowProxy(const uint32_t NewSize);
   static void signalHandler(int Signal, siginfo_t *Siginfo, void *);
   /// @}
 

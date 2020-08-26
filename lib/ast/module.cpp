@@ -221,6 +221,10 @@ Expect<void> Module::loadCompiled(LDMgr &Mgr) {
       }
     }
   }
+  if (TableSec) {
+    auto &TableType = TableSec->getContent().front();
+    TableType->setSymbol(Mgr.getSymbol("table"));
+  }
   if (MemorySec) {
     auto &MemType = MemorySec->getContent().front();
     MemType->setSymbol(Mgr.getSymbol<uint8_t *>("mem"));

@@ -165,7 +165,9 @@ Expect<void> Interpreter::instantiate(Runtime::StoreManager &StoreMgr,
   /// Setup callbacks for compiled module
   Mod.setTrapCodeProxy(&Interpreter::TrapCodeProxy);
   Mod.setCallProxy(&Interpreter::callProxy);
+  Mod.setTableCallProxy(&Interpreter::tableCallProxy);
   Mod.setMemGrowProxy(&Interpreter::memGrowProxy);
+  Mod.setTableGrowProxy(&Interpreter::tableGrowProxy);
 
   /// Instantiate StartSection (StartSec)
   const AST::StartSection *StartSec = Mod.getStartSection();

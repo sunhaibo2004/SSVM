@@ -57,7 +57,8 @@ Interpreter::instantiate(Runtime::StoreManager &StoreMgr,
       if (Symbol) {
         uint32_t Addr = *ModInst.getTableAddr(ExtIdx);
         auto *Inst = *StoreMgr.getTable(Addr);
-        Inst->setSymbol(std::move(Symbol).cast<uint32_t>());
+        Inst->setSymbol(
+            std::move(Symbol).cast<std::pair<uint32_t, uint32_t> *>());
       }
       break;
     default:

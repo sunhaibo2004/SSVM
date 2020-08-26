@@ -85,8 +85,12 @@ Loader::parseModule(std::string_view FilePath) {
       Mod->setTrapCodeProxySymbol(
           LMgr.getSymbol<AST::Module::TrapCodeProxy>("code"));
       Mod->setCallProxySymbol(LMgr.getSymbol<AST::Module::CallProxy>("call"));
+      Mod->setTableCallProxySymbol(
+          LMgr.getSymbol<AST::Module::TableCallProxy>("tablecall"));
       Mod->setMemGrowProxySymbol(
           LMgr.getSymbol<AST::Module::MemGrowProxy>("memgrow"));
+      Mod->setTableGrowProxySymbol(
+          LMgr.getSymbol<AST::Module::TableGrowProxy>("tablegrow"));
       return Mod;
     } else {
       LOG(ERROR) << ErrInfo::InfoFile(FilePath);
