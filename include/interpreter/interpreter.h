@@ -24,9 +24,7 @@
 #include "support/measure.h"
 #include "support/time.h"
 
-#include <cassert>
 #include <csetjmp>
-#include <csignal>
 #include <memory>
 #include <type_traits>
 #include <vector>
@@ -89,11 +87,8 @@ class Interpreter {
 public:
   Interpreter(Support::Measurement *M = nullptr,
               Statistics::Statistics *S = nullptr)
-      : Measure(M), Stat(S) {
-    assert(This == nullptr);
-    This = this;
-  }
-  ~Interpreter() noexcept { This = nullptr; }
+      : Measure(M), Stat(S) {}
+  ~Interpreter() = default;
 
   /// Instantiate Wasm Module.
   Expect<void> instantiateModule(Runtime::StoreManager &StoreMgr,
@@ -370,18 +365,16 @@ private:
 
   /// \name Run compiled functions
   /// @{
+  void trap(uint32_t Status);
   void call(const uint32_t FuncIndex, const ValVariant *Args, ValVariant *Rets);
   uint32_t memGrow(const uint32_t NewSize);
+  uint32_t memSize();
 
-  /// Pointer to current object.
-  static Interpreter *This;
-  /// jmp_buf for trap.
-  static sigjmp_buf *TrapJump;
-  static uint32_t TrapCodeProxy;
-  static void callProxy(const uint32_t FuncIndex, const ValVariant *Args,
-                        ValVariant *Rets);
-  static uint32_t memGrowProxy(const uint32_t NewSize);
-  static void signalHandler(int Signal, siginfo_t *Siginfo, void *);
+  static void trapProxy(Interpreter *This, uint32_t Status);
+  static void callProxy(Interpreter *This, const uint32_t FuncIndex,
+                        const ValVariant *Args, ValVariant *Rets);
+  static uint32_t memGrowProxy(Interpreter *This, const uint32_t NewSize);
+  static uint32_t memSizeProxy(Interpreter *This);
   /// @}
 
   enum class InstantiateMode : uint8_t { Instantiate = 0, ImportWasm };
@@ -396,6 +389,8 @@ private:
   Support::Measurement *Measure;
   /// Interpreter statistics
   Statistics::Statistics *Stat;
+  /// jmp_buf for trap.
+  std::jmp_buf TrapJump;
   Runtime::StoreManager *CurrentStore;
 };
 

@@ -19,12 +19,11 @@
 #include "support/span.h"
 
 #include <algorithm>
+#include <boost/align/aligned_allocator.hpp>
 #include <cstring>
 #include <memory>
 #include <utility>
-
-#include <linux/mman.h>
-#include <sys/mman.h>
+#include <vector>
 
 namespace SSVM {
 namespace Runtime {
@@ -33,20 +32,11 @@ namespace Instance {
 class MemoryInstance {
 public:
   static inline constexpr const uint64_t kPageSize = UINT64_C(65536);
-  static inline constexpr const uint64_t k4G = UINT64_C(0x100000000);
-  static inline constexpr const uint64_t k8G = UINT64_C(0x200000000);
   MemoryInstance() = delete;
   MemoryInstance(const AST::Limit &Lim)
       : HasMaxPage(Lim.hasMax()), MinPage(Lim.getMin()), MaxPage(Lim.getMax()),
-        CurrPage(Lim.getMin()) {
-    const auto Pages = static_cast<uint8_t *>(
-        mmap(nullptr, k8G, PROT_READ | PROT_WRITE,
-             MAP_PRIVATE | MAP_ANONYMOUS | MAP_UNINITIALIZED, -1, 0));
-    mprotect(Pages + CurrPage * kPageSize, k8G - CurrPage * kPageSize,
-             PROT_NONE);
-    DataPtr = Pages;
-  }
-  ~MemoryInstance() noexcept { munmap(DataPtr, k8G); }
+        CurrPage(Lim.getMin()), Data(CurrPage * kPageSize) {}
+  virtual ~MemoryInstance() noexcept = default;
 
   /// Get page size of memory.data
   uint32_t getDataPageSize() const noexcept { return CurrPage; }
@@ -64,27 +54,28 @@ public:
   bool checkAccessBound(uint32_t Offset, uint32_t Length) const noexcept {
     const uint64_t AccessLen =
         static_cast<uint64_t>(Offset) + static_cast<uint64_t>(Length);
-    return AccessLen <= CurrPage * kPageSize;
+    return AccessLen <= Data.size();
   }
 
   /// Get boundary index.
   uint32_t getBoundIdx() const noexcept {
-    return CurrPage > 0 ? CurrPage * kPageSize - 1 : 0;
+    return ((Data.size() > 0) ? (Data.size() - 1) : 0);
   }
 
   /// Grow page
   bool growPage(const uint32_t Count) {
-    /// Maximum pages count, 65536
-    uint32_t MaxPageCaped = k4G / kPageSize;
+    uint32_t MaxPageCaped = UINT32_C(65536);
     if (HasMaxPage) {
       MaxPageCaped = std::min(MaxPage, MaxPageCaped);
     }
     if (Count + CurrPage > MaxPageCaped) {
       return false;
     }
-    mprotect(DataPtr + CurrPage * kPageSize, Count * kPageSize,
-             PROT_READ | PROT_WRITE);
     CurrPage += Count;
+    Data.resize(CurrPage * kPageSize);
+    if (Symbol) {
+      *Symbol = Data.data();
+    }
     return true;
   }
 
@@ -96,7 +87,7 @@ public:
       LOG(ERROR) << ErrInfo::InfoBoundary(Offset, Length, getBoundIdx());
       return Unexpect(ErrCode::MemoryOutOfBounds);
     }
-    return Span<Byte>(&DataPtr[Offset], Length);
+    return Span<Byte>(&Data[Offset], Length);
   }
 
   /// Replace the bytes of Data[Offset :] by Slice[Start : Start + Legnth - 1]
@@ -120,7 +111,7 @@ public:
     /// Copy data.
     if (Length > 0) {
       std::copy(Slice.begin() + Start, Slice.begin() + Start + Length,
-                DataPtr + Offset);
+                Data.begin() + Offset);
     }
     return {};
   }
@@ -137,9 +128,11 @@ public:
     if (Length > 0) {
       /// Copy data.
       if (IsReverse) {
-        std::reverse_copy(DataPtr + Offset, DataPtr + Offset + Length, Arr);
+        for (uint32_t I = 0; I < Length; I++) {
+          Arr[I] = Data[Offset + Length - I - 1];
+        }
       } else {
-        std::copy(DataPtr + Offset, DataPtr + Offset + Length, Arr);
+        std::copy(Data.begin() + Offset, Data.begin() + Offset + Length, Arr);
       }
     }
     return {};
@@ -157,9 +150,11 @@ public:
     if (Length > 0) {
       /// Copy data.
       if (IsReverse) {
-        std::reverse_copy(Arr, Arr + Length, DataPtr + Offset);
+        for (uint32_t I = 0; I < Length; I++) {
+          Data[Offset + Length - I - 1] = Arr[I];
+        }
       } else {
-        std::copy(Arr, Arr + Length, DataPtr + Offset);
+        std::copy(Arr, Arr + Length, Data.begin() + Offset);
       }
     }
     return {};
@@ -173,7 +168,7 @@ public:
         !checkAccessBound(Offset, sizeof(std::remove_pointer_t<T>))) {
       return nullptr;
     }
-    return reinterpret_cast<T>(&DataPtr[Offset]);
+    return reinterpret_cast<T>(&Data[Offset]);
   }
 
   /// Get pointer to specific offset of memory.
@@ -185,7 +180,7 @@ public:
     if (!checkAccessBound(Offset, ByteSize)) {
       return nullptr;
     }
-    return reinterpret_cast<T>(&DataPtr[Offset]);
+    return reinterpret_cast<T>(&Data[Offset]);
   }
 
   /// Template of loading bytes and convert to a value.
@@ -219,11 +214,11 @@ public:
     if (Length > 0) {
       if (std::is_floating_point_v<T>) {
         /// Floating case. Do memory copy.
-        std::memcpy(&Value, &DataPtr[Offset], sizeof(T));
+        std::memcpy(&Value, &Data[Offset], sizeof(T));
       } else {
         uint64_t LoadVal = 0;
         /// Integer case. Extends to result type.
-        std::memcpy(&LoadVal, &DataPtr[Offset], Length);
+        std::memcpy(&LoadVal, &Data[Offset], Length);
         if (std::is_signed_v<T> && (LoadVal >> (Length * 8 - 1))) {
           /// Signed extend.
           for (unsigned int I = Length; I < 8; I++) {
@@ -264,7 +259,7 @@ public:
     }
     /// Copy store data to value.
     if (Length > 0) {
-      std::memcpy(&DataPtr[Offset], &Value, Length);
+      std::memcpy(&Data[Offset], &Value, Length);
     }
     return {};
   }
@@ -274,7 +269,7 @@ public:
   /// Setter of symbol
   void setSymbol(void *S) {
     Symbol = reinterpret_cast<uint8_t **>(S);
-    *Symbol = DataPtr;
+    *Symbol = Data.data();
   }
 
 private:
@@ -283,8 +278,8 @@ private:
   const bool HasMaxPage;
   const uint32_t MinPage;
   const uint32_t MaxPage;
-  uint8_t *DataPtr = nullptr;
-  uint32_t CurrPage = 0;
+  uint32_t CurrPage;
+  std::vector<Byte, boost::alignment::aligned_allocator<Byte, 65536>> Data;
   uint8_t **Symbol = nullptr;
   /// @}
 };

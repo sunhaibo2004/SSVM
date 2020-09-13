@@ -8,7 +8,6 @@ install(TARGETS ssvmc EXPORT ssvm DESTINATION bin)
 target_link_libraries(ssvmc
   PRIVATE
   ssvmLoader
-  ssvmValidator
   ssvmAOT
   std::filesystem
 )

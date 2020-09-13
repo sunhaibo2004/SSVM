@@ -3,7 +3,6 @@
 #include "loader/loader.h"
 #include "po/argument_parser.h"
 #include "support/filesystem.h"
-#include "validator/validator.h"
 #include <iostream>
 
 int main(int Argc, const char *Argv[]) {
@@ -49,15 +48,6 @@ int main(int Argc, const char *Argv[]) {
     const auto Err = static_cast<uint32_t>(Res.error());
     std::cout << "Load failed. Error code:" << Err << std::endl;
     return EXIT_FAILURE;
-  }
-
-  {
-    SSVM::Validator::Validator ValidatorEngine;
-    if (auto Res = ValidatorEngine.validate(*Module); !Res) {
-      const auto Err = static_cast<uint32_t>(Res.error());
-      std::cout << "Validate failed. Error code:" << Err << std::endl;
-      return EXIT_FAILURE;
-    }
   }
 
   {
