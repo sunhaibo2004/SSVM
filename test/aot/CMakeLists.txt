@@ -23,8 +23,7 @@ add_executable(ssvmAOTCoreTests
   AOTcoreTest.cpp
 )
 
-### Disable this for passing CI.
-#add_test(ssvmAOTCoreTests ssvmAOTCoreTests)
+add_test(ssvmAOTCoreTests ssvmAOTCoreTests)
 
 target_link_libraries(ssvmAOTCoreTests
   PRIVATE
