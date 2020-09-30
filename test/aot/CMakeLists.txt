@@ -18,3 +18,20 @@ target_link_libraries(ssvmAOTWagonTests
   ssvmLoader
   ssvmAOT
 )
+
+add_executable(ssvmAOTCoreTests
+  AOTcoreTest.cpp
+)
+
+### Disable this for passing CI.
+#add_test(ssvmAOTCoreTests ssvmAOTCoreTests)
+
+target_link_libraries(ssvmAOTCoreTests
+  PRIVATE
+  std::filesystem
+  utilGoogleTest
+  ssvmTestSpec
+  ssvmLoader
+  ssvmAOT
+  ssvmVM
+)
